@@ -1642,6 +1642,124 @@ static sd::Tensor<float> sample_euler(denoise_cb_t model,
     return x;
 }
 
+// Corrected Adams-Bashforth (CAB-2), flow formulation.
+// Independent implementation from the method equations; see arXiv:2605.16736.
+static sd::Tensor<float> sample_cab2(denoise_cb_t model,
+                                     sd::Tensor<float> x,
+                                     const std::vector<float>& sigmas,
+                                     const KeyValueArgs& extra_sample_args) {
+    float theta         = 0.20f;
+    float bootstrap_mix = 1.0f;
+
+    for (const auto& [key, value] : extra_sample_args) {
+        if (key == "cab_theta") {
+            float parsed = 0.0f;
+            if (!parse_strict_float(value, parsed) || !std::isfinite(parsed)) {
+                LOG_WARN("ignoring invalid cab2 extra sample arg '%s=%s'", key.c_str(), value.c_str());
+                continue;
+            }
+            LOG_VERBOSE("setting cab2 theta to %.2f", parsed);
+            theta = parsed;
+        } else if (key == "cab_bootstrap_mix") {
+            float parsed = 0.0f;
+            if (!parse_strict_float(value, parsed) || !std::isfinite(parsed) || parsed < 0.0f || parsed > 1.0f) {
+                LOG_WARN("ignoring invalid cab2 extra sample arg '%s=%s' (expected 0..1)",
+                         key.c_str(), value.c_str());
+                continue;
+            }
+            LOG_VERBOSE("setting cab2 bootstrap mix to %.2f", parsed);
+            bootstrap_mix = parsed;
+        }
+    }
+
+    auto safe_scalar = [](float value) {
+        constexpr float eps = 1e-12f;
+        return std::fabs(value) >= eps ? value : std::copysign(eps, value);
+    };
+
+    sd::Tensor<float> last_velocity;
+    sd::Tensor<float> previous_epsilon;
+    sd::Tensor<float> previous_previous_epsilon;
+
+    float previous_h_lambda          = 0.0f;
+    float previous_previous_h_lambda = 0.0f;
+
+    int steps = static_cast<int>(sigmas.size()) - 1;
+    for (int i = 0; i < steps; ++i) {
+        float sigma      = sigmas[i];
+        float sigma_next = sigmas[i + 1];
+
+        auto denoised_opt = model(x, sigma, i + 1);
+        if (denoised_opt.pred.empty()) {
+            return {};
+        }
+
+        sd::Tensor<float> denoised = std::move(denoised_opt.pred);
+        sd::Tensor<float> velocity = (x - denoised) / safe_scalar(sigma);
+
+        float delta      = sigma_next - sigma;
+        float alpha      = 1.0f - sigma;
+        float alpha_next = 1.0f - sigma_next;
+
+        float lambda_current = sigma / safe_scalar(alpha);
+        float lambda_next    = sigma_next / safe_scalar(alpha_next);
+        float h_lambda       = lambda_next - lambda_current;
+
+        sd::Tensor<float> epsilon_current = x + velocity * alpha;
+
+        // First step: Euler bootstrap.
+        sd::Tensor<float> next_sample = x + velocity * delta;
+
+        if (i == 1) {
+            // Second step: interpolate between Euler (0) and AB2 (1).
+            // bootstrap_mix=1 preserves the standard CAB flow bootstrap.
+            // Values below 1 are an experimental low-NFE extension and are not part of CAB.
+            float history_weight = 0.5f * bootstrap_mix;
+            next_sample = x +
+                          (velocity * (1.0f + history_weight) -
+                           last_velocity * history_weight) *
+                              delta;
+        } else if (i >= 2) {
+            float step_ratio = h_lambda / safe_scalar(previous_h_lambda);
+
+            sd::Tensor<float> direction =
+                epsilon_current * (1.0f + 0.5f * step_ratio) -
+                previous_epsilon * (0.5f * step_ratio);
+
+            sd::Tensor<float> y_current   = x / safe_scalar(alpha);
+            sd::Tensor<float> y_predictor = y_current + direction * h_lambda;
+
+            float history_ratio =
+                previous_h_lambda / safe_scalar(previous_previous_h_lambda);
+
+            sd::Tensor<float> epsilon_extrapolated =
+                previous_epsilon * (1.0f + history_ratio) -
+                previous_previous_epsilon * history_ratio;
+
+            sd::Tensor<float> defect = epsilon_current - epsilon_extrapolated;
+            sd::Tensor<float> y_next =
+                y_predictor + defect * (theta * h_lambda);
+
+            next_sample = y_next * safe_scalar(alpha_next);
+        }
+
+        if (i == 0) {
+            previous_epsilon  = std::move(epsilon_current);
+            previous_h_lambda = h_lambda;
+        } else {
+            previous_previous_epsilon  = std::move(previous_epsilon);
+            previous_epsilon           = std::move(epsilon_current);
+            previous_previous_h_lambda = previous_h_lambda;
+            previous_h_lambda          = h_lambda;
+        }
+
+        last_velocity = std::move(velocity);
+        x             = std::move(next_sample);
+    }
+
+    return x;
+}
+
 static sd::Tensor<float> sample_heun(denoise_cb_t model,
                                      sd::Tensor<float> x,
                                      const std::vector<float>& sigmas) {
@@ -2893,6 +3011,12 @@ static sd::Tensor<float> sample_k_diffusion(sample_method_t method,
             return sample_tcd(model, std::move(x), sigmas, rng, eta);
         case LMS_SAMPLE_METHOD:
             return sample_lms(model, std::move(x), sigmas, extra_args);
+        case CAB2_SAMPLE_METHOD:
+            if (!is_flow_denoiser) {
+                LOG_WARN("CAB-2 currently supports flow denoisers only");
+                return {};
+            }
+            return sample_cab2(model, std::move(x), sigmas, extra_args);
         case EULER_CFG_PP_SAMPLE_METHOD:
             return sample_euler_cfg_pp(model, std::move(x), sigmas);
         case EULER_A_CFG_PP_SAMPLE_METHOD:

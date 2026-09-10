@@ -153,6 +153,7 @@ const char* sampling_methods_str[] = {
     "DPM++ (2M) SDE",
     "DPM++ (2M) SDE BT",
     "LMS",
+    "CAB-2",
 };
 
 static_assert(SAMPLE_METHOD_COUNT == sizeof(sampling_methods_str) / sizeof(sampling_methods_str[0]),
@@ -3326,6 +3327,7 @@ const char* sample_method_to_str[] = {
     "dpm++2m_sde",
     "dpm++2m_sde_bt",
     "lms",
+    "cab2",
 };
 
 static_assert(SAMPLE_METHOD_COUNT == sizeof(sample_method_to_str) / sizeof(sample_method_to_str[0]),
