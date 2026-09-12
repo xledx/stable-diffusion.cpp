@@ -732,6 +732,7 @@ bool GGMLRunner::execute_segment(ggml_cgraph* graph, int n_threads) {
     }
     auto scheduler = workspace_.scheduler();
     ggml_status status;
+    const int64_t t_compute0 = ggml_time_ms();
     if (scheduler != nullptr) {
         if (sd_get_backend_eval_callback() != nullptr && !multi_device_eval_callback_warned) {
             LOG_WARN("%s: eval callback is not supported with the backend scheduler; ignoring", get_desc().c_str());
@@ -744,6 +745,10 @@ bool GGMLRunner::execute_segment(ggml_cgraph* graph, int n_threads) {
                                                              sd_get_backend_eval_callback_data());
     }
     workspace_.synchronize();
+
+    LOG_VERBOSE("%s graph compute completed, taking %.2fs",
+                get_desc().c_str(),
+                (ggml_time_ms() - t_compute0) / 1000.f);
     if (status != GGML_STATUS_SUCCESS) {
         LOG_ERROR("%s compute failed: %s", get_desc().c_str(), ggml_status_to_string(status));
         return false;
