@@ -1987,6 +1987,7 @@ struct LLMEmbedder : public Conditioner {
             }
         }
 
+        int64_t t_llm0 = ggml_time_ms();
         auto hidden_states = llm->compute(n_threads,
                                           input_ids,
                                           attention_mask,
@@ -1996,6 +1997,8 @@ struct LLMEmbedder : public Conditioner {
                                           false,
                                           deepstack_image_embeds,
                                           image_grids);
+        int64_t t_llm1 = ggml_time_ms();
+        LOG_INFO("H3 llm->compute completed, taking %" PRId64 " ms", t_llm1 - t_llm0);
         GGML_ASSERT(!hidden_states.empty());
         hidden_states = apply_token_weights(std::move(hidden_states), weights);
         GGML_ASSERT(hidden_states.shape()[1] > prompt_template_encode_start_idx);
